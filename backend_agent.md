@@ -389,7 +389,93 @@ POST /generate (full pipeline):
 
 ---
 
-## 9. 코드 수정 시 참고
+## 9. 실시간 스트리밍 (SSE + asyncio.Queue)
+
+에이전트가 도구를 호출할 때마다 프론트엔드에 실시간으로 진행 상황을 보여준다.
+
+### 동작 흐름
+
+```
+1. 프론트엔드 → POST /extract-fr-nfr → 202 응답
+2. 프론트엔드 → new EventSource('/stream') → SSE 연결 열기
+3. BackgroundTask에서 에이전트 실행:
+   agent.astream_events() 루프:
+     → on_tool_start: "save_requirements"
+       → asyncio.Queue.put({type: "tool_start", message: "FR/NFR 추출 중..."})
+     → on_tool_end: "save_requirements"
+       → asyncio.Queue.put({type: "tool_end", message: "FR 8개 완료"})
+     → on_tool_start: "save_testcases" ...
+
+4. SSE Endpoint에서 Queue.get()으로 이벤트 수신:
+   → yield "event: step\ndata: {...}\n\n"   ← 프론트로 전송
+
+5. 프론트엔드 EventSource가 step 이벤트 수신:
+   → 로딩 메시지에 단계 추가:
+     ✓ FR/NFR 추출 중... → Saved 8 FR and 3 NFR
+     ✓ 테스트 케이스 생성 중... → Saved 15 test cases
+     ● 커버리지 확인 중...  ← 현재 진행 중
+
+6. done 이벤트 수신 → DB에서 최종 결과 fetch → 결과 카드 표시
+```
+
+### 핵심 구성 요소
+
+```
+testcase_agent.py:
+  _event_queues: dict[str, asyncio.Queue]  ← 세션별 큐
+  get_event_queue(session_id) → Queue      ← 큐 가져오기/생성
+  _publish_event(session_id, event)        ← 큐에 이벤트 발행
+  TOOL_DISPLAY: dict                       ← 도구 이름 → 한국어 메시지 매핑
+
+  _invoke_agent_with_fallback():
+    이전: await agent.ainvoke(...)          ← 결과만 받음
+    현재: async for event in agent.astream_events(...):  ← 중간 이벤트도 받음
+          → on_tool_start → _publish_event()
+          → on_tool_end → _publish_event()
+
+routers/testcase.py:
+  _run_extract_fr_nfr(): 완료 시 → _publish_event({type: "done"})
+  stream_session_status(): Queue.get() → SSE yield
+
+stores/testcase.ts:
+  startPolling(): new EventSource() → step/done/error 이벤트 수신
+  _addAgentStep(): 로딩 메시지에 진행 단계 추가
+  _fallbackToPolling(): SSE 실패 시 기존 2초 폴링으로 전환
+
+pages/index.vue:
+  msg.steps 배열을 순회하며 ✓/● 아이콘과 함께 단계 표시
+```
+
+### astream_events vs ainvoke 비교
+
+```python
+# ainvoke: 결과만 받음 (2단계)
+result = await agent.ainvoke({"messages": [...]})
+# → 에이전트가 끝날 때까지 아무 정보 없음
+
+# astream_events: 중간 과정도 받음 (3단계)
+async for event in agent.astream_events({"messages": [...]}, version="v2"):
+    if event["event"] == "on_tool_start":
+        print(f"도구 시작: {event['name']}")  # "save_requirements"
+    elif event["event"] == "on_tool_end":
+        print(f"도구 완료: {event['data']['output']}")  # "Saved 8 FR..."
+# → 에이전트가 실행되는 동안 각 단계를 실시간으로 관찰
+```
+
+### SSE Fallback 전략
+
+```
+1차: EventSource (SSE) 시도
+  ├─ 성공 → 실시간 단계 표시
+  └─ 실패 (네트워크 문제, SSR 등)
+       → _fallbackToPolling()
+       → 2초마다 DB 폴링 (기존 방식)
+       → 단계 표시 없이 최종 결과만 표시
+```
+
+---
+
+## 10. 코드 수정 시 참고
 
 ### 도구를 추가하고 싶을 때
 

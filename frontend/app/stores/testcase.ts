@@ -72,6 +72,13 @@ interface Session {
   updated_at: string
 }
 
+/** 에이전트 진행 단계 (실시간 스트리밍용) */
+interface AgentStep {
+  message: string        // 표시할 메시지 (예: "FR/NFR 추출 중...")
+  done: boolean          // 완료 여부 (true: ✅, false: 🔄)
+  icon?: string          // 아이콘 타입 (search, testcase, chart 등)
+}
+
 /** 채팅 메시지 구조 (프론트엔드 전용, DB에 저장하지 않음) */
 interface ChatMessage {
   id: string
@@ -81,10 +88,11 @@ interface ChatMessage {
   data?: any                        // FR/NFR, TC, Validation 데이터 (type에 따라 다름)
   timestamp: Date
   actionType?: 'generate' | 'validate'  // 메시지 하단에 표시할 액션 버튼 종류
+  steps?: AgentStep[]               // 에이전트 진행 단계 (loading 타입에서 사용)
 }
 
 // 타입을 외부에서도 사용할 수 있도록 export
-export type { FrNfrItem, TestCase, ValidationResult, Session, ChatMessage }
+export type { FrNfrItem, TestCase, ValidationResult, Session, ChatMessage, AgentStep }
 
 // ---------------------------------------------------------------------------
 // 메시지 ID 생성 유틸리티
@@ -112,9 +120,10 @@ export const useTestcaseStore = defineStore('testcase', {
     currentSession: null as Session | null,       // 현재 선택된 세션
     messages: [] as ChatMessage[],                // 채팅 메시지 배열
     loading: false,                               // API 호출 중 여부 (버튼 비활성화에 사용)
-    polling: false,                               // 폴링 진행 중 여부
+    polling: false,                               // 폴링/스트리밍 진행 중 여부
     error: null as string | null,                 // 에러 메시지 (토스트 표시)
-    _pollTimer: null as ReturnType<typeof setInterval> | null,  // 폴링 타이머 ID
+    _pollTimer: null as ReturnType<typeof setInterval> | null,  // 폴링 타이머 ID (fallback용)
+    _eventSource: null as EventSource | null,     // SSE 연결 객체 (실시간 스트리밍용)
     _pendingLoadingMsgId: null as string | null,  // 현재 로딩 메시지의 ID (교체용)
   }),
 
@@ -167,62 +176,173 @@ export const useTestcaseStore = defineStore('testcase', {
     },
 
     // -----------------------------------------------------------------------
-    // 폴링 (Polling): 백그라운드 작업 완료 감지
+    // SSE 스트리밍: 에이전트 진행 상황 실시간 수신
     // -----------------------------------------------------------------------
-    // 백엔드가 비동기로 처리하므로 (202 응답 후 백그라운드에서 작업),
-    // 프론트엔드는 2초마다 "작업 끝났어?" 하고 확인해야 한다.
+    // 이전: 2초마다 DB 폴링 → "processing..." 만 표시
+    // 현재: SSE(Server-Sent Events)로 에이전트의 도구 호출 과정을 실시간 수신
     //
-    // 대안으로 WebSocket이나 SSE(Server-Sent Events)가 있지만,
-    // 폴링이 가장 간단하고 안정적이다.
+    // SSE란?
+    // - 서버 → 클라이언트로 단방향 이벤트를 전송하는 HTTP 기반 기술
+    // - 브라우저의 EventSource API로 수신 (자동 재연결 기능 포함)
+    // - WebSocket보다 단순하고 HTTP 프록시와 호환됨
+    //
+    // 이벤트 종류:
+    //   step: 에이전트의 중간 과정 (도구 시작/완료)
+    //   done: 작업 완료 (최종 결과 로드)
+    //   error: 에러 발생
 
-    /** 폴링 중지 */
+    /** 스트리밍/폴링 중지 */
     stopPolling() {
+      // SSE 연결 종료
+      if (this._eventSource) {
+        this._eventSource.close()
+        this._eventSource = null
+      }
+      // 폴링 타이머 종료 (fallback용)
       if (this._pollTimer) {
-        clearInterval(this._pollTimer)  // setInterval 해제
+        clearInterval(this._pollTimer)
         this._pollTimer = null
       }
       this.polling = false
     },
 
     /**
-     * 폴링 시작: 2초마다 세션 상태를 확인하여 작업 완료를 감지
+     * SSE 스트리밍 시작: 에이전트의 도구 호출 과정을 실시간으로 수신한다.
      *
-     * @param sessionId - 확인할 세션 ID
-     * @param expectedStatus - 기다리는 상태값
-     *   'extracted': FR/NFR 추출 완료 대기
-     *   'completed': TC 생성 완료 대기
-     *   'validated': 검증 완료 대기
+     * EventSource가 백엔드의 /stream 엔드포인트에 연결하면:
+     * 1. step 이벤트 → 로딩 메시지에 진행 단계 추가 (예: "FR/NFR 추출 중...")
+     * 2. done 이벤트 → 최종 결과를 DB에서 가져와서 표시
+     * 3. error 이벤트 → 에러 메시지 표시
+     *
+     * SSE 연결이 실패하면 자동으로 폴링(fallback)으로 전환한다.
+     *
+     * @param sessionId - 세션 UUID
+     * @param expectedStatus - 기다리는 완료 상태 ('extracted' | 'completed' | 'validated')
      */
     startPolling(sessionId: string, expectedStatus: string) {
-      this.stopPolling()  // 기존 폴링이 있으면 먼저 중지
+      this.stopPolling()
       this.polling = true
 
-      // 즉시 1회 조회
+      const config = useRuntimeConfig()
+      const streamUrl = `${config.public.apiBase}/testcase/${sessionId}/stream`
+
+      try {
+        // -----------------------------------------------------------------
+        // EventSource: 브라우저 내장 SSE 클라이언트
+        // -----------------------------------------------------------------
+        // new EventSource(url): 서버에 HTTP GET 연결을 열고 이벤트를 수신
+        // 연결이 끊어지면 자동으로 재연결 시도 (브라우저 내장 기능)
+        const es = new EventSource(streamUrl)
+        this._eventSource = es
+
+        // -----------------------------------------------------------------
+        // step 이벤트: 에이전트의 중간 과정 (도구 시작/완료)
+        // -----------------------------------------------------------------
+        // 도구 호출 시마다 수신됨. 로딩 메시지에 단계를 추가하여
+        // 사용자에게 "에이전트가 지금 뭘 하고 있는지" 보여준다.
+        es.addEventListener('step', (e: MessageEvent) => {
+          const data = JSON.parse(e.data)
+          this._addAgentStep(data)
+        })
+
+        // -----------------------------------------------------------------
+        // done 이벤트: 작업 완료
+        // -----------------------------------------------------------------
+        // 에이전트가 모든 도구 호출을 마치고 결과가 DB에 저장된 후 수신.
+        // DB에서 최신 세션 데이터를 가져와서 결과 메시지로 교체한다.
+        es.addEventListener('done', async (e: MessageEvent) => {
+          this.stopPolling()
+          // 최종 결과를 DB에서 가져와서 표시
+          const session = await this.fetchSession(sessionId)
+          if (!session) return
+
+          if (expectedStatus === 'extracted' && session.fr_nfr) {
+            this._replaceLoadingMsg({
+              type: 'fr_nfr',
+              content: 'Here are the extracted Functional and Non-Functional Requirements:',
+              data: session.fr_nfr,
+              actionType: 'generate'
+            })
+          } else if (expectedStatus === 'completed' && session.testcases) {
+            this._replaceLoadingMsg({
+              type: 'testcases',
+              content: `Generated ${session.testcases.length} test cases:`,
+              data: session.testcases,
+              actionType: 'validate'
+            })
+          } else if (expectedStatus === 'validated' && session.validation) {
+            this._replaceLoadingMsg({
+              type: 'validation',
+              content: 'Validation complete. Here are the coverage results:',
+              data: session.validation
+            })
+          }
+          await this.fetchSessions()
+        })
+
+        // -----------------------------------------------------------------
+        // error 이벤트: 에이전트 실행 중 에러 발생
+        // -----------------------------------------------------------------
+        es.addEventListener('error', (e: Event) => {
+          // EventSource 자체 에러 (연결 실패 등)
+          if (es.readyState === EventSource.CLOSED) {
+            // SSE 연결 실패 → 폴링으로 fallback
+            this._fallbackToPolling(sessionId, expectedStatus)
+            return
+          }
+          // 서버에서 보낸 error 이벤트
+          const msgEvent = e as MessageEvent
+          if (msgEvent.data) {
+            try {
+              const data = JSON.parse(msgEvent.data)
+              this.stopPolling()
+              this._replaceLoadingMsg({
+                type: 'text',
+                content: data.message || 'Something went wrong.'
+              })
+              this.fetchSessions()
+            } catch {
+              // JSON 파싱 실패 시 무시
+            }
+          }
+        })
+
+      } catch {
+        // EventSource 생성 자체가 실패 (SSR 환경 등)
+        // → 폴링으로 fallback
+        this._fallbackToPolling(sessionId, expectedStatus)
+      }
+    },
+
+    /**
+     * SSE 실패 시 기존 폴링 방식으로 fallback.
+     * 2초마다 DB를 직접 조회하여 완료를 감지한다.
+     */
+    _fallbackToPolling(sessionId: string, expectedStatus: string) {
+      this.stopPolling()
+      this.polling = true
       this.fetchSession(sessionId)
 
-      // 2초마다 반복 조회
       this._pollTimer = setInterval(async () => {
         const session = await this.fetchSession(sessionId)
         if (!session) return
 
-        // 상태별 처리: 원하는 상태에 도달하면 폴링 중지 + 메시지 교체
         if (expectedStatus === 'extracted' && session.status === 'extracted') {
           this.stopPolling()
-          // 로딩 메시지를 FR/NFR 결과 메시지로 교체
           this._replaceLoadingMsg({
             type: 'fr_nfr',
             content: 'Here are the extracted Functional and Non-Functional Requirements:',
             data: session.fr_nfr,
-            actionType: 'generate'  // "Generate Test Cases" 버튼 표시
+            actionType: 'generate'
           })
-          await this.fetchSessions()  // 사이드바 세션 목록 갱신
+          await this.fetchSessions()
         } else if (expectedStatus === 'completed' && session.status === 'completed') {
           this.stopPolling()
           this._replaceLoadingMsg({
             type: 'testcases',
             content: `Generated ${session.testcases?.length || 0} test cases:`,
             data: session.testcases,
-            actionType: 'validate'  // "Validate Coverage" 버튼 표시
+            actionType: 'validate'
           })
           await this.fetchSessions()
         } else if (expectedStatus === 'validated' && session.validation) {
@@ -234,7 +354,6 @@ export const useTestcaseStore = defineStore('testcase', {
           })
           await this.fetchSessions()
         } else if (session.status === 'failed') {
-          // 실패 시 폴링 중지 + 에러 메시지 표시
           this.stopPolling()
           this._replaceLoadingMsg({
             type: 'text',
@@ -242,7 +361,7 @@ export const useTestcaseStore = defineStore('testcase', {
           })
           await this.fetchSessions()
         }
-      }, 2000)  // 2000ms = 2초
+      }, 2000)
     },
 
     // -----------------------------------------------------------------------
@@ -263,6 +382,58 @@ export const useTestcaseStore = defineStore('testcase', {
       }
       this.messages.push(msg)
       this._pendingLoadingMsgId = msg.id  // 교체 대상 ID 기록
+    },
+
+    /**
+     * 에이전트 진행 단계를 로딩 메시지에 추가한다.
+     *
+     * SSE의 step 이벤트를 받을 때마다 호출된다.
+     * 로딩 메시지의 steps 배열에 단계를 추가/업데이트하여
+     * 사용자에게 에이전트가 지금 뭘 하고 있는지 보여준다.
+     *
+     * 화면 예시:
+     *   ✅ 요구사항에서 FR/NFR 추출 중... → Saved 8 FR and 3 NFR
+     *   ✅ 테스트 케이스 생성 중... → Saved 15 test cases
+     *   🔄 커버리지 확인 중...  ← 현재 진행 중
+     */
+    _addAgentStep(data: { type: string, tool?: string, message: string, icon?: string }) {
+      if (!this._pendingLoadingMsgId) return
+      const idx = this.messages.findIndex(m => m.id === this._pendingLoadingMsgId)
+      if (idx < 0) return
+
+      const msg = this.messages[idx]
+      // steps 배열이 없으면 초기화
+      if (!msg.steps) {
+        msg.steps = []
+      }
+
+      if (data.type === 'tool_start') {
+        // 도구 시작: 새 단계 추가 (진행 중 상태)
+        msg.steps.push({
+          message: data.message,
+          done: false,
+          icon: data.icon,
+        })
+        // 로딩 메시지의 content도 현재 단계로 업데이트
+        msg.content = data.message
+      } else if (data.type === 'tool_end') {
+        // 도구 완료: 마지막 진행 중 단계를 완료로 변경
+        const lastPending = [...msg.steps].reverse().find(s => !s.done)
+        if (lastPending) {
+          lastPending.done = true
+          lastPending.message = data.message  // 결과 메시지로 교체
+        }
+      } else if (data.type === 'agent_start' || data.type === 'fallback') {
+        // 에이전트 시작 또는 모델 변경: 정보성 단계 추가
+        msg.steps.push({
+          message: data.message,
+          done: true,
+          icon: data.icon,
+        })
+      }
+
+      // 반응형 업데이트 트리거 (Vue가 배열 내부 변경을 감지하도록)
+      this.messages[idx] = { ...msg }
     },
 
     /**

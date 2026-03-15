@@ -1,37 +1,39 @@
 """
-DeepAgent + 커스텀 도구 기반 TestCase 생성 에이전트 (2단계)
-==========================================================
-
-1단계에서는 DeepAgent를 "똑똑한 LLM 호출기"로만 사용했다.
-→ 프롬프트를 보내고 JSON 텍스트 응답을 받아서 파싱하는 구조
-→ 에이전트가 스스로 판단/분할/재시도하지 않음
-→ 30페이지 SRS 같은 대규모 요구사항에 대응 불가
+DeepAgent + 커스텀 도구 기반 TestCase 생성 에이전트 (2단계 + 실시간 스트리밍)
+===============================================================================
 
 2단계에서는 커스텀 도구(@tool)를 정의하고 에이전트가 자율적으로 호출한다.
-→ 에이전트가 문서를 섹션별로 나눠서 분석 (save_requirements 여러 번 호출)
-→ FR/NFR 그룹별로 TC 생성 (save_testcases 여러 번 호출)
-→ 커버리지 검증 후 부족하면 자동 보완 (check_coverage → save_testcases 반복)
-→ create_react_agent처럼 에이전트가 도구 호출 순서/횟수를 스스로 결정
 
-비유:
-- 1단계: "이 문서 분석해서 JSON으로 줘" (수동 지시)
-- 2단계: "이 문서 분석해" → 에이전트가 알아서 도구를 골라서 작업 (자율 판단)
+3단계(현재)에서는 에이전트의 도구 호출 과정을 실시간으로 프론트엔드에 스트리밍한다.
 
-아키텍처:
-                                ┌─ save_requirements (FR/NFR 축적)
-  사용자 → DeepAgent → 도구 선택 ├─ save_testcases (TC 축적)
-                                ├─ check_coverage (커버리지 계산)
-                                ├─ get_progress (진행 상황 확인)
-                                └─ save_validation (검증 결과 저장)
+실시간 스트리밍 아키텍처:
+  ┌─ BackgroundTask ──────────────────────────────────┐
+  │  agent.astream_events()                            │
+  │    → on_tool_start: "save_requirements 호출 중..."  │
+  │    → on_tool_end: "FR 8개 추출 완료"                │
+  │    → 각 이벤트를 asyncio.Queue에 push              │
+  └────────────────────────┬───────────────────────────┘
+                           ▼
+  ┌─ asyncio.Queue (세션별) ──────────────────────────┐
+  │  {"type": "tool_start", "message": "FR/NFR 추출 중"}│
+  │  {"type": "tool_end", "message": "FR 8개 완료"}     │
+  └────────────────────────┬───────────────────────────┘
+                           ▼
+  ┌─ SSE Endpoint ─────────────────────────────────────┐
+  │  Queue에서 읽어서 → event: step / data: {...}       │
+  │  → 프론트엔드의 EventSource가 실시간 수신            │
+  └────────────────────────────────────────────────────┘
 
-  도구 호출 결과는 contextvars로 관리되는 세션 컨텍스트에 축적된다.
-  에이전트가 작업을 끝내면, 축적된 결과를 읽어서 DB에 저장한다.
+왜 asyncio.Queue인가?
+  - 같은 프로세스 안에서 BackgroundTask → SSE Endpoint 간 데이터 전달
+  - Python 내장 (설치 불필요), 비동기 안전
+  - 서버를 여러 대로 확장할 때는 RabbitMQ/Redis로 교체 가능
 """
 
+import asyncio
 import contextvars
 import copy
 import json
-import re
 import uuid
 
 from dotenv import load_dotenv
@@ -63,27 +65,91 @@ MODEL_CHAIN = [
 # ---------------------------------------------------------------------------
 # 세션 컨텍스트 (도구들이 결과를 축적하는 공유 저장소)
 # ---------------------------------------------------------------------------
-# contextvars를 사용하는 이유:
-# - asyncio에서 태스크별로 격리된 컨텍스트를 제공한다
-# - 세션 A의 백그라운드 태스크와 세션 B의 백그라운드 태스크가 동시 실행되어도
-#   각각 자기만의 _current_context를 가진다 (충돌 없음)
-# - 에이전트 → 도구 호출 시 같은 async 태스크 내이므로 컨텍스트가 공유됨
 _current_context: contextvars.ContextVar[dict] = contextvars.ContextVar("agent_context")
+
+
+# ---------------------------------------------------------------------------
+# 이벤트 큐 관리 (에이전트 → SSE 실시간 스트리밍용)
+# ---------------------------------------------------------------------------
+# asyncio.Queue: 같은 프로세스 안에서 비동기 태스크 간 데이터를 전달하는 통로
+# - put(): 데이터를 큐에 넣는다 (BackgroundTask에서)
+# - get(): 데이터를 큐에서 꺼낸다 (SSE Endpoint에서, 데이터 올 때까지 대기)
+#
+# 세션별로 큐를 생성하여 여러 세션이 동시에 실행되어도 이벤트가 섞이지 않는다.
+_event_queues: dict[str, asyncio.Queue] = {}
+
+
+def get_event_queue(session_id: str) -> asyncio.Queue:
+    """세션별 이벤트 큐를 가져온다. 없으면 새로 생성한다.
+
+    이 큐를 통해:
+    - BackgroundTask(에이전트)가 도구 호출 이벤트를 push
+    - SSE Endpoint가 이벤트를 pop하여 프론트엔드에 전송
+
+    Args:
+        session_id: 세션 UUID 문자열
+
+    Returns:
+        해당 세션의 asyncio.Queue 인스턴스
+    """
+    if session_id not in _event_queues:
+        _event_queues[session_id] = asyncio.Queue()
+    return _event_queues[session_id]
+
+
+def cleanup_event_queue(session_id: str) -> None:
+    """세션의 이벤트 큐를 정리한다. 작업 완료 후 메모리 해제용."""
+    _event_queues.pop(session_id, None)
+
+
+async def _publish_event(session_id: str, event: dict) -> None:
+    """이벤트를 세션 큐에 발행한다.
+
+    SSE Endpoint가 연결되어 있으면 즉시 전달되고,
+    연결되어 있지 않으면 큐에 쌓여서 나중에 전달된다.
+
+    Args:
+        session_id: 세션 UUID 문자열
+        event: 이벤트 데이터 dict
+               예: {"type": "tool_start", "tool": "save_requirements",
+                    "message": "FR/NFR 추출 중..."}
+    """
+    queue = get_event_queue(session_id)
+    await queue.put(event)
+
+
+# ---------------------------------------------------------------------------
+# 도구 이름 → 사용자 친화적 메시지 매핑
+# ---------------------------------------------------------------------------
+# 에이전트의 도구 호출 이벤트를 프론트엔드에서 보여줄 메시지로 변환한다.
+# 도구 이름은 영문이지만, 표시 메시지는 한국어와 이모지를 사용하여 직관적으로 만든다.
+TOOL_DISPLAY = {
+    "save_requirements": {
+        "start": "요구사항에서 FR/NFR 추출 중...",
+        "icon": "search",
+    },
+    "save_testcases": {
+        "start": "테스트 케이스 생성 중...",
+        "icon": "testcase",
+    },
+    "check_coverage": {
+        "start": "커버리지 확인 중...",
+        "icon": "chart",
+    },
+    "get_progress": {
+        "start": "진행 상황 확인 중...",
+        "icon": "progress",
+    },
+    "save_validation": {
+        "start": "검증 결과 정리 중...",
+        "icon": "validate",
+    },
+}
 
 
 # ---------------------------------------------------------------------------
 # 커스텀 도구 정의 (@tool)
 # ---------------------------------------------------------------------------
-# 이 도구들은 create_deep_agent(tools=[...])에 전달되어 에이전트가 사용한다.
-# 에이전트(LLM)가 "어떤 도구를 호출할지, 몇 번 호출할지"를 스스로 판단한다.
-#
-# 이전 방식 (create_react_agent)과 같은 원리:
-#   agent = create_react_agent(model, tools=[tool1, tool2])
-# DeepAgent는 여기에 TodoList, SubAgent 등 미들웨어를 자동 추가해준다.
-#
-# 도구의 인자는 JSON string을 사용한다 (gpt-5-nano 호환성을 위해)
-# → 복잡한 중첩 스키마보다 JSON 문자열이 소형 모델에서 더 안정적
-
 
 @tool
 def save_requirements(section_name: str, requirements_json: str) -> str:
@@ -104,7 +170,6 @@ def save_requirements(section_name: str, requirements_json: str) -> str:
     fr_list = data.get("fr", [])
     nfr_list = data.get("nfr", [])
 
-    # ID 중복 방지: 이미 축적된 ID는 건너뛴다
     existing_fr_ids = {item["id"] for item in ctx["fr"]}
     new_fr = [item for item in fr_list if item.get("id") not in existing_fr_ids]
     ctx["fr"].extend(new_fr)
@@ -139,7 +204,6 @@ def save_testcases(group_name: str, testcases_json: str) -> str:
     if not isinstance(testcases, list):
         testcases = [testcases]
 
-    # ID 보정 및 fr_nfr_ref 정규화
     for tc in testcases:
         if not tc.get("id"):
             tc["id"] = f"TC-{len(ctx['testcases']) + 1:03d}"
@@ -176,7 +240,6 @@ def check_coverage() -> str:
     for tc in ctx["testcases"]:
         covered_ids.update(tc.get("fr_nfr_ref", []))
 
-    # 실제 존재하는 FR/NFR만 카운트
     covered_ids = covered_ids & all_req_ids
     uncovered = sorted(all_req_ids - covered_ids)
     pct = round(len(covered_ids) / len(all_req_ids) * 100, 1)
@@ -219,8 +282,10 @@ def save_validation(validation_json: str) -> str:
     return f"Validation saved. Coverage: {validation.get('coverage_score')}, Sufficient: {validation.get('is_sufficient')}"
 
 
-# 에이전트에 전달할 도구 목록
 AGENT_TOOLS = [save_requirements, save_testcases, check_coverage, get_progress, save_validation]
+
+# 우리 커스텀 도구 이름 set (DeepAgent 빌트인 도구와 구분하기 위해)
+_CUSTOM_TOOL_NAMES = {t.name for t in AGENT_TOOLS}
 
 
 # ---------------------------------------------------------------------------
@@ -282,18 +347,9 @@ def _create_model(model_name: str) -> BaseChatModel:
 
 
 def _get_agent(model_name: str) -> CompiledStateGraph:
-    """모델별 DeepAgent 인스턴스를 캐시하여 반환한다.
-
-    1단계와의 차이: tools=AGENT_TOOLS를 전달하여
-    에이전트가 커스텀 도구를 자율적으로 호출할 수 있다.
-
-    create_deep_agent(tools=[...])의 내부 동작:
-    1. 커스텀 도구 + DeepAgent 빌트인 도구(write_todos, ls, read_file 등)를 합침
-    2. model.bind_tools(all_tools)로 모델에 도구 스키마를 바인딩
-    3. LangGraph 에이전트 루프: 모델 호출 → 도구 선택 → 도구 실행 → 결과 반환 → 반복
-    """
+    """모델별 DeepAgent 인스턴스를 캐시하여 반환한다."""
     if model_name not in _agents:
-        logger.info(f"DeepAgent 생성 (2단계 도구 기반): model={model_name}")
+        logger.info(f"DeepAgent 생성 (도구 기반 + 스트리밍): model={model_name}")
         model = _create_model(model_name)
 
         _agents[model_name] = create_deep_agent(
@@ -311,7 +367,7 @@ def _get_agent(model_name: str) -> CompiledStateGraph:
 
 
 # ---------------------------------------------------------------------------
-# Fallback이 적용된 에이전트 호출 (도구 결과는 컨텍스트에 축적)
+# Fallback + 실시간 스트리밍이 적용된 에이전트 호출
 # ---------------------------------------------------------------------------
 
 
@@ -319,7 +375,6 @@ def _fresh_context(initial: dict | None = None) -> dict:
     """깨끗한 세션 컨텍스트를 생성한다."""
     base = {"fr": [], "nfr": [], "testcases": [], "validation": None}
     if initial:
-        # deep copy로 원본 오염 방지
         for key in base:
             if key in initial and initial[key] is not None:
                 base[key] = copy.deepcopy(initial[key])
@@ -332,27 +387,29 @@ async def _invoke_agent_with_fallback(
     initial_ctx: dict | None = None,
     validate_fn=None,
 ) -> dict:
-    """MODEL_CHAIN의 모델들을 순서대로 시도한다. 도구 결과는 컨텍스트에 축적된다.
+    """MODEL_CHAIN의 모델들을 순서대로 시도한다.
 
-    1단계와의 차이:
-    - 텍스트 응답 대신 도구로 축적된 컨텍스트를 반환한다.
-    - validate_fn으로 "에이전트가 도구를 실제로 사용했는지" 검증한다.
-    - 각 시도마다 깨끗한 컨텍스트로 시작한다 (실패한 시도의 부분 결과 오염 방지).
+    이전(2단계)과의 차이:
+    - ainvoke() 대신 astream_events()를 사용하여
+      도구 호출 과정을 실시간으로 이벤트 큐에 발행한다.
+    - SSE Endpoint가 이 큐를 읽어서 프론트엔드에 스트리밍한다.
+    - 도구 결과는 여전히 contextvars에 축적된다 (기존 동작 유지).
 
-    Args:
-        prompt: 에이전트에게 보낼 사용자 메시지
-        session_id: 대화 컨텍스트 식별자 (세션 UUID)
-        initial_ctx: 초기 컨텍스트 (기존 FR/NFR이나 TC가 있는 경우)
-        validate_fn: 컨텍스트 검증 함수. ctx를 받아 bool을 반환.
-                     False면 "도구를 사용하지 않음"으로 판단하여 fallback 시도.
+    astream_events()란?
+    - LangGraph의 스트리밍 API. 에이전트가 실행되는 동안
+      각 단계(모델 호출, 도구 호출, 도구 완료 등)의 이벤트를 yield한다.
+    - ainvoke()와 달리 중간 과정을 관찰할 수 있다.
+    - 에이전트 실행은 동일하게 완료된다 (도구 실행, 상태 업데이트 모두 정상 동작).
 
-    Returns:
-        도구 호출로 축적된 세션 컨텍스트 dict
+    이벤트 종류 (astream_events v2):
+    - on_tool_start: 도구 호출 시작 (도구 이름, 인자 포함)
+    - on_tool_end: 도구 호출 완료 (반환값 포함)
+    - on_chat_model_stream: 모델의 토큰 스트리밍 (사용 안 함)
+    - 기타: on_chain_start, on_chain_end 등 (내부 이벤트, 무시)
     """
     last_error = None
 
     for i, model_name in enumerate(MODEL_CHAIN):
-        # 각 시도마다 깨끗한 컨텍스트 → 실패한 시도의 부분 결과가 다음 시도에 영향 없음
         ctx = _fresh_context(initial_ctx)
         _current_context.set(ctx)
 
@@ -361,12 +418,53 @@ async def _invoke_agent_with_fallback(
 
         try:
             agent = _get_agent(model_name)
-            await agent.ainvoke(
+
+            # 에이전트 시작 이벤트 발행
+            await _publish_event(session_id, {
+                "type": "agent_start",
+                "message": "에이전트가 작업을 시작합니다...",
+                "model": model_name,
+            })
+
+            # ---------------------------------------------------------
+            # astream_events(): 에이전트 실행 + 중간 이벤트 스트리밍
+            # ---------------------------------------------------------
+            # ainvoke()와 동일하게 에이전트를 끝까지 실행하지만,
+            # 실행 중 발생하는 이벤트를 async for로 하나씩 받을 수 있다.
+            #
+            # version="v2": 이벤트 형식 버전 (v2가 최신, 더 구조화됨)
+            async for event in agent.astream_events(
                 {"messages": [{"role": "user", "content": prompt}]},
                 config=config,
-            )
+                version="v2",
+            ):
+                event_kind = event.get("event", "")
+                event_name = event.get("name", "")
 
-            # 에이전트가 도구를 실제로 사용했는지 검증
+                # 우리 커스텀 도구의 시작/종료만 캡처
+                # (DeepAgent 빌트인 도구 이벤트는 무시)
+                if event_kind == "on_tool_start" and event_name in _CUSTOM_TOOL_NAMES:
+                    # 도구 호출 시작 → 프론트엔드에 "~~ 중..." 표시
+                    display = TOOL_DISPLAY.get(event_name, {})
+                    await _publish_event(session_id, {
+                        "type": "tool_start",
+                        "tool": event_name,
+                        "message": display.get("start", f"{event_name} 실행 중..."),
+                        "icon": display.get("icon", "default"),
+                    })
+
+                elif event_kind == "on_tool_end" and event_name in _CUSTOM_TOOL_NAMES:
+                    # 도구 호출 완료 → 프론트엔드에 결과 표시
+                    output = event.get("data", {}).get("output", "")
+                    await _publish_event(session_id, {
+                        "type": "tool_end",
+                        "tool": event_name,
+                        "message": str(output),
+                        "icon": TOOL_DISPLAY.get(event_name, {}).get("icon", "default"),
+                    })
+
+            # astream_events 루프가 끝나면 에이전트 실행 완료
+            # → contextvars에 축적된 결과를 검증
             if validate_fn and not validate_fn(ctx):
                 raise ValueError(
                     f"Agent ({model_name}) did not produce expected results via tools. "
@@ -388,6 +486,11 @@ async def _invoke_agent_with_fallback(
                 logger.info(
                     f"[session={session_id}] Fallback → {MODEL_CHAIN[i + 1]}"
                 )
+                # Fallback 이벤트도 발행
+                await _publish_event(session_id, {
+                    "type": "fallback",
+                    "message": f"모델 변경: {MODEL_CHAIN[i + 1]}로 재시도...",
+                })
 
     raise last_error  # type: ignore[misc]
 
@@ -395,31 +498,10 @@ async def _invoke_agent_with_fallback(
 # ---------------------------------------------------------------------------
 # 공개 API: 라우터의 백그라운드 태스크에서 호출하는 함수들
 # ---------------------------------------------------------------------------
-# 함수 시그니처는 1단계와 동일 → 라우터 변경 최소화
-#
-# 1단계: 프롬프트 → 텍스트 응답 → JSON 파싱
-# 2단계: 프롬프트 → 에이전트가 도구로 결과 축적 → 컨텍스트에서 결과 읽기
-# ---------------------------------------------------------------------------
 
 
 async def extract_fr_nfr(requirement: str, session_id: str) -> dict:
-    """요구사항 문서에서 FR/NFR을 추출한다.
-
-    2단계 동작 방식:
-    1. 에이전트에게 요구사항 분석을 지시
-    2. 에이전트가 스스로 판단하여 save_requirements 도구를 호출
-       - 짧은 문서: 1번 호출
-       - 긴 문서: 섹션별로 여러 번 호출
-    3. 도구 호출 결과가 _current_context에 축적됨
-    4. 축적된 컨텍스트에서 FR/NFR을 읽어서 반환
-
-    Args:
-        requirement: 요구사항/SRS/PRD 원문 텍스트
-        session_id: DB 세션 UUID 문자열
-
-    Returns:
-        {"fr": [...], "nfr": [...]}
-    """
+    """요구사항 문서에서 FR/NFR을 추출한다. 도구 호출 과정이 실시간 스트리밍된다."""
     prompt = (
         "Analyze the following requirement document and extract ALL "
         "Functional Requirements (FR) and Non-Functional Requirements (NFR).\n\n"
@@ -428,7 +510,7 @@ async def extract_fr_nfr(requirement: str, session_id: str) -> dict:
         f"REQUIREMENT DOCUMENT:\n{requirement}"
     )
 
-    logger.info(f"[session={session_id}] FR/NFR 추출 시작 (2단계 도구 기반)")
+    logger.info(f"[session={session_id}] FR/NFR 추출 시작 (스트리밍)")
 
     ctx = await _invoke_agent_with_fallback(
         prompt,
@@ -446,17 +528,7 @@ async def extract_fr_nfr(requirement: str, session_id: str) -> dict:
 async def generate_testcases(
     requirement: str, fr_nfr: dict, session_id: str
 ) -> list[dict]:
-    """FR/NFR을 기반으로 테스트 케이스를 생성한다.
-
-    2단계 동작 방식:
-    1. 기존 FR/NFR을 초기 컨텍스트에 로드
-    2. 에이전트에게 TC 생성을 지시
-    3. 에이전트가 스스로:
-       - FR/NFR을 그룹별로 나눠서 save_testcases 여러 번 호출
-       - check_coverage로 커버리지 검증
-       - 80% 미만이면 추가 TC 생성 (자동 보완 루프)
-    4. 최종 축적된 TC 반환
-    """
+    """FR/NFR을 기반으로 테스트 케이스를 생성한다. 도구 호출 과정이 실시간 스트리밍된다."""
     fr_nfr_summary = json.dumps(fr_nfr, indent=2, ensure_ascii=False)
     prompt = (
         "Generate comprehensive test cases for the following requirements.\n\n"
@@ -471,9 +543,8 @@ async def generate_testcases(
         f"FR/NFR LIST:\n{fr_nfr_summary}"
     )
 
-    logger.info(f"[session={session_id}] 테스트 케이스 생성 시작 (2단계 도구 기반)")
+    logger.info(f"[session={session_id}] 테스트 케이스 생성 시작 (스트리밍)")
 
-    # 기존 FR/NFR을 초기 컨텍스트에 로드 → check_coverage가 정확히 계산 가능
     initial = {"fr": fr_nfr.get("fr", []), "nfr": fr_nfr.get("nfr", [])}
 
     ctx = await _invoke_agent_with_fallback(
@@ -492,13 +563,7 @@ async def generate_testcases(
 async def validate_testcases(
     requirement: str, fr_nfr: dict, testcases: list[dict], session_id: str
 ) -> dict:
-    """테스트 케이스의 커버리지를 검증한다.
-
-    2단계 동작 방식:
-    1. 기존 FR/NFR + TC를 초기 컨텍스트에 로드
-    2. 에이전트가 check_coverage 도구로 메트릭 확인
-    3. 에이전트가 종합 분석 후 save_validation 도구로 결과 저장
-    """
+    """테스트 케이스의 커버리지를 검증한다. 도구 호출 과정이 실시간 스트리밍된다."""
     prompt = (
         "Validate the test case coverage against the requirements.\n\n"
         "STEPS:\n"
@@ -508,7 +573,7 @@ async def validate_testcases(
         f"REQUIREMENT:\n{requirement}"
     )
 
-    logger.info(f"[session={session_id}] 커버리지 검증 시작 (2단계 도구 기반)")
+    logger.info(f"[session={session_id}] 커버리지 검증 시작 (스트리밍)")
 
     initial = {
         "fr": fr_nfr.get("fr", []),

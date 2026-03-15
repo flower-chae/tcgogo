@@ -220,13 +220,22 @@ store.extractFrNfr(text, type)         ← testcase.ts
     ├─ _addLoadingMsg("Analyzing...")  ← 채팅에 로딩(●●●) 추가
     ├─ $fetch(POST /extract-fr-nfr)    ← 백엔드 API 호출 → 202 즉시 응답
     ├─ currentSession = {...}          ← 임시 세션 설정
-    └─ startPolling(id, 'extracted')   ← 폴링 시작
+    └─ startPolling(id, 'extracted')   ← SSE 스트리밍 시작
          │
-         └─ 2초마다 반복:
-              fetchSession(id) → status 확인
-              ├─ 'extracted'  → _replaceLoadingMsg(FR/NFR 결과)  ← ●●● → 카드 교체
-              ├─ 'failed'     → _replaceLoadingMsg(에러 메시지)
-              └─ 그 외        → 계속 폴링
+         ├─ new EventSource('/stream')  ← SSE 연결
+         │
+         ├─ step 이벤트 수신 (실시간):
+         │    → _addAgentStep({type: "tool_start", message: "FR/NFR 추출 중..."})
+         │    → _addAgentStep({type: "tool_end", message: "FR 8개 완료"})
+         │    → 로딩 메시지에 단계가 하나씩 추가됨:
+         │       ✓ 요구사항에서 FR/NFR 추출 중... → Saved 8 FR and 3 NFR
+         │       ● 테스트 케이스 생성 중...  ← 현재 진행 중
+         │
+         ├─ done 이벤트 수신:
+         │    → fetchSession(id) → 최종 데이터 가져오기
+         │    → _replaceLoadingMsg(FR/NFR 결과 카드)
+         │
+         └─ SSE 실패 시 → _fallbackToPolling() → 2초마다 DB 폴링 (기존 방식)
 ```
 
 ### 패턴 2: 메시지 교체 (Loading → Result)
@@ -294,7 +303,74 @@ actionType 설정 로직:
 
 ---
 
-## 6. Tailwind CSS 자주 쓰이는 클래스 사전
+## 6. 패턴 5: SSE 실시간 스트리밍 (에이전트 진행 상황)
+
+### EventSource란?
+
+```typescript
+// 브라우저 내장 API. 서버가 보내는 이벤트를 실시간으로 수신한다.
+// HTTP 연결을 유지하면서 서버 → 클라이언트 단방향 데이터 전송.
+// WebSocket보다 단순하고 자동 재연결 기능이 내장됨.
+
+const es = new EventSource('http://localhost:3480/api/v1/testcase/{id}/stream')
+
+// 이벤트별 리스너 등록
+es.addEventListener('step', (e) => {
+  const data = JSON.parse(e.data)
+  // data = { type: "tool_start", tool: "save_requirements", message: "FR/NFR 추출 중..." }
+})
+
+es.addEventListener('done', (e) => {
+  es.close()  // 완료 시 연결 종료
+  // 최종 결과 표시
+})
+
+es.addEventListener('error', (e) => {
+  // 연결 에러 → 폴링으로 fallback
+})
+```
+
+### 로딩 메시지의 steps 배열
+
+```
+SSE 이벤트가 올 때마다 steps 배열에 단계가 추가된다:
+
+처음: steps = []
+  → 로딩 메시지: "Analyzing..." ●●●
+
+step(tool_start) 수신 후: steps = [{ message: "FR/NFR 추출 중...", done: false }]
+  → ● FR/NFR 추출 중...
+    ●●●
+
+step(tool_end) 수신 후: steps = [{ message: "Saved 8 FR and 3 NFR", done: true }]
+  → ✓ Saved 8 FR and 3 NFR
+
+step(tool_start) 수신 후: steps = [..., { message: "TC 생성 중...", done: false }]
+  → ✓ Saved 8 FR and 3 NFR
+    ● TC 생성 중...
+    ●●●
+
+done 수신 후: → 전체가 결과 카드로 교체됨
+```
+
+### Fallback 전략
+
+```typescript
+// SSE가 실패하면 (네트워크 문제, 브라우저 미지원 등)
+// 기존 2초 폴링 방식으로 자동 전환한다.
+// 사용자 경험: 단계별 표시 없이 최종 결과만 표시 (기존과 동일)
+
+try {
+  const es = new EventSource(url)  // SSE 시도
+  // ...
+} catch {
+  this._fallbackToPolling(id, status)  // 실패 시 폴링
+}
+```
+
+---
+
+## 7. Tailwind CSS 자주 쓰이는 클래스 사전
 
 ### 레이아웃
 
