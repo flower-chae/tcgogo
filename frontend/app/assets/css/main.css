@@ -135,22 +135,13 @@ html, body {
   0% { background-position: 200% center; }
   100% { background-position: 0% center; }
 }
-.animate-shimmer {
-  color: #8b949e !important;
-  background: linear-gradient(
-    90deg,
-    #8b949e 0%,
-    #a371f7 15%,
-    #58a6ff 30%,
-    #3fb950 45%,
-    #58a6ff 60%,
-    #a371f7 75%,
-    #8b949e 90%,
-    #a371f7 100%
-  ) !important;
-  background-size: 300% auto !important;
-  -webkit-background-clip: text !important;
-  background-clip: text !important;
-  -webkit-text-fill-color: transparent !important;
-  animation: color-flow 4s linear infinite;
+/* text-shimmer: 회색 톤에 밝은 빛이 왼→오로 흐르는 효과
+   CSS 클래스 버전 (인라인 style 대신 사용 가능한지 테스트용) */
+.text-shimmer {
+  background: linear-gradient(90deg, #6e7681 0%, #6e7681 35%, #e6edf3 50%, #6e7681 65%, #6e7681 100%);
+  background-size: 200% auto;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: shimmer-glow 3.5s linear infinite;
 }

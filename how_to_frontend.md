@@ -193,8 +193,10 @@ Claude Code에 작업을 지시할 때 사용할 수 있는 효과 이름과 의
   100% { background-position: 0% center; }    /* 왼쪽으로 이동 완료 */
 }
 
-/* 적용 방법 (인라인 style 권장 — Tailwind가 덮어쓰는 문제 방지) */
-style="
+/* 적용 방법: main.css에 클래스로 정의하고 사용 */
+
+/* main.css에 정의 */
+.text-shimmer {
   background: linear-gradient(90deg,
     #6e7681 0%,      /* 기본 회색 */
     #6e7681 35%,     /* 회색 유지 */
@@ -207,9 +209,10 @@ style="
   background-clip: text;
   -webkit-text-fill-color: transparent;  /* 기본 텍스트 색 숨기기 */
   animation: shimmer-glow 3.5s linear infinite;
-"
+}
+
+/* Vue 템플릿에서 사용 */
+<p class="text-sm text-shimmer">{{ msg.content }}</p>
 ```
 
-**주의: CSS 클래스 대신 인라인 style로 적용해야 한다.**
-Tailwind 4 + Vite 환경에서 `background-clip: text`가 클래스로 적용 시
-Tailwind에 의해 덮어씌워질 수 있다. 인라인 style은 항상 최우선 적용.
+**적용 방법:** `assets/css/main.css`에 클래스를 정의하고, 템플릿에서 클래스명으로 사용한다.

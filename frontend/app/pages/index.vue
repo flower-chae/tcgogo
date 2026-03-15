@@ -392,10 +392,7 @@ onMounted(() => {
                 <div class="flex-1 min-w-0">
                   <!-- Loading / 에이전트 진행 상황 (Claude Code "Inferring" 스타일) -->
                   <div v-if="msg.type === 'loading'" class="space-y-2">
-                    <p
-                      class="text-sm"
-                      style="background: linear-gradient(90deg, #6e7681 0%, #6e7681 35%, #e6edf3 50%, #6e7681 65%, #6e7681 100%); background-size: 200% auto; -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; animation: shimmer-glow 3.5s linear infinite;"
-                    >{{ msg.content }}</p>
+                    <p class="text-sm text-shimmer">{{ msg.content }}</p>
                     <div class="flex gap-1 py-1">
                       <div class="typing-dot w-1.5 h-1.5 rounded-full" style="background-color: #58a6ff;"></div>
                       <div class="typing-dot w-1.5 h-1.5 rounded-full" style="background-color: #58a6ff;"></div>

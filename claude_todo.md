@@ -100,7 +100,7 @@ frontend/app/
 | 주석 | 한국어로 충분히 (학습 목적) |
 | 모델 | 회사에서 Azure OpenAI 사용 예정 (gpt-5.2, 5.3-codex, 5.4) |
 | 배포 | Jenkins + Docker Compose |
-| CSS 주의 | background-clip: text 등은 Tailwind가 덮어쓰므로 인라인 style 사용 |
+| CSS 효과 | text shimmer 등 특수 효과는 main.css에 클래스로 정의 (.text-shimmer) |
 
 ---
 
