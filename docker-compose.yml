@@ -1,4 +1,7 @@
 services:
+  # ─────────────────────────────────────
+  # PostgreSQL (기존)
+  # ─────────────────────────────────────
   postgres:
     image: postgres:16-alpine
     container_name: deepagent_postgres
@@ -16,6 +19,52 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+
+  # ─────────────────────────────────────
+  # Backend (FastAPI + DeepAgent)
+  # ─────────────────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: deepagent_backend
+    restart: unless-stopped
+    ports:
+      - "${BACKEND_PORT:-3480}:3480"
+    environment:
+      # DB: 컨테이너 네트워크에서는 postgres 서비스명으로 접속
+      DATABASE_URL: postgresql://${POSTGRES_USER:-deepagent}:${POSTGRES_PASSWORD:-deepagent1234}@postgres:5432/${POSTGRES_DB:-deepagent}
+      # OpenAI API Key: .env 파일 또는 Jenkins Credentials에서 주입
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:3480/api/v1/sample/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # ─────────────────────────────────────
+  # Frontend (Nuxt 4)
+  # ─────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        # 브라우저에서 API 호출하는 주소
+        # 로컬: http://localhost:3480/api/v1
+        # 배포: https://your-domain.com/api/v1
+        NUXT_PUBLIC_API_BASE: ${NUXT_PUBLIC_API_BASE:-http://localhost:3480/api/v1}
+    container_name: deepagent_frontend
+    restart: unless-stopped
+    ports:
+      - "${FRONTEND_PORT:-3482}:3482"
+    depends_on:
+      backend:
+        condition: service_healthy
 
 volumes:
   postgres_data:

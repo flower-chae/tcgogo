@@ -62,7 +62,11 @@ def _row_to_session_response(row) -> SessionResponse:
 
 
 async def _run_extract_fr_nfr(session_id: uuid.UUID, requirement: str) -> None:
-    """Background task: extract FR/NFR and update the DB session."""
+    """Background task: extract FR/NFR and update the DB session.
+
+    DeepAgent에 session_id를 thread_id로 전달하여
+    이후 generate/validate 단계에서 대화 컨텍스트가 유지된다.
+    """
     from src.agents.testcase_agent import extract_fr_nfr
 
     pool = get_pool()
@@ -75,7 +79,8 @@ async def _run_extract_fr_nfr(session_id: uuid.UUID, requirement: str) -> None:
         )
 
         try:
-            fr_nfr = await extract_fr_nfr(requirement)
+            # session_id를 문자열로 변환하여 DeepAgent의 thread_id로 사용
+            fr_nfr = await extract_fr_nfr(requirement, str(session_id))
 
             await conn.execute(
                 "UPDATE testcase_sessions SET fr_nfr = $1, status = $2, updated_at = NOW() WHERE id = $3",
@@ -111,7 +116,8 @@ async def _run_generation(session_id: uuid.UUID) -> None:
                 return
 
             fr_nfr = row["fr_nfr"] or {"fr": [], "nfr": []}
-            testcases = await generate_testcases(row["requirement"], fr_nfr)
+            # session_id를 전달하여 DeepAgent가 extract 단계의 대화를 기억
+            testcases = await generate_testcases(row["requirement"], fr_nfr, str(session_id))
 
             await conn.execute(
                 "UPDATE testcase_sessions SET testcases = $1, status = $2, updated_at = NOW() WHERE id = $3",
@@ -147,8 +153,9 @@ async def _run_validation(session_id: uuid.UUID) -> None:
 
         try:
             fr_nfr = row["fr_nfr"] or {"fr": [], "nfr": []}
+            # session_id를 전달하여 DeepAgent가 전체 파이프라인 대화를 기억
             validation = await validate_testcases(
-                row["requirement"], fr_nfr, row["testcases"] or [],
+                row["requirement"], fr_nfr, row["testcases"] or [], str(session_id),
             )
 
             await conn.execute(
