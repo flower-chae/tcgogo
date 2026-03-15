@@ -1,52 +1,106 @@
+/*
+ * main.css: 글로벌 CSS 스타일
+ * ============================
+ * nuxt.config.ts의 css: ['~/assets/css/main.css']로 등록되어
+ * 모든 페이지에 자동 적용된다.
+ *
+ * 이 파일의 역할:
+ * 1. Tailwind CSS import (유틸리티 클래스 활성화)
+ * 2. 다크 테마 기본 색상 설정 (GitHub Dark 스타일)
+ * 3. 커스텀 애니메이션 정의 (타이핑 인디케이터, 페이드인 등)
+ *
+ * 색상 팔레트 (GitHub Dark 테마):
+ * - 배경:     #0d1117 (메인), #161b22 (사이드바/카드)
+ * - 텍스트:   #e6edf3 (기본), #8b949e (보조), #484f58 (비활성)
+ * - 테두리:   #30363d (기본), #21262d (약한)
+ * - 액센트:   #1f6feb (파랑), #7c6af4 (보라), #238636 (녹색)
+ */
+
+/* Tailwind CSS를 가져온다. 이 한 줄로 모든 유틸리티 클래스가 활성화된다.
+   예: flex, grid, gap-2, p-4, rounded-lg, bg-gray-800, text-sm 등
+   Tailwind는 사용된 클래스만 최종 CSS에 포함하므로 번들 크기가 작다. */
 @import "tailwindcss";
 
-/* Global dark theme styles */
+/* -----------------------------------------------------------------------
+   다크 테마 기본 스타일
+   ----------------------------------------------------------------------- */
+/* html, body에 설정하면 모든 페이지에 적용된다 */
 html, body {
-  background-color: #0d1117;
-  color: #e6edf3;
+  background-color: #0d1117;   /* GitHub Dark의 메인 배경색 */
+  color: #e6edf3;              /* 기본 텍스트 색상 (밝은 회색) */
+  /* 시스템 폰트 스택: OS별 기본 폰트를 순서대로 시도한다
+     macOS: -apple-system → Windows: Segoe UI → Linux: Noto Sans → 범용: Arial */
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif;
   margin: 0;
   padding: 0;
 }
 
+/* box-sizing: border-box를 전체에 적용
+   → padding과 border가 width/height에 포함됨
+   → 예: width: 100px + padding: 10px = 여전히 100px (기본값은 120px) */
 * {
   box-sizing: border-box;
 }
 
-/* Scrollbar styling */
+/* -----------------------------------------------------------------------
+   스크롤바 커스텀 (Chrome, Edge, Safari용)
+   ----------------------------------------------------------------------- */
+/* Firefox는 scrollbar-width, scrollbar-color 속성을 사용하지만
+   여기서는 WebKit 기반 브라우저만 대응한다 */
 ::-webkit-scrollbar {
-  width: 6px;
+  width: 6px;                  /* 스크롤바 너비를 6px로 줄임 (기본값: ~17px) */
 }
 ::-webkit-scrollbar-track {
-  background: transparent;
+  background: transparent;     /* 스크롤바 트랙(배경)을 투명하게 */
 }
 ::-webkit-scrollbar-thumb {
-  background: #30363d;
-  border-radius: 3px;
+  background: #30363d;         /* 스크롤바 핸들 색상 (테두리와 같은 색) */
+  border-radius: 3px;          /* 둥글게 */
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #484f58;
+  background: #484f58;         /* 호버 시 좀 더 밝게 */
 }
 
-/* Typing indicator animation */
+/* -----------------------------------------------------------------------
+   타이핑 인디케이터 애니메이션 (AI가 응답 중일 때 표시)
+   ----------------------------------------------------------------------- */
+/* 3개의 점(●●●)이 순서대로 위아래로 튀는 애니메이션
+   ChatGPT/Gemini의 "AI가 생각 중..." 표시와 동일한 패턴
+
+   @keyframes: CSS 애니메이션의 각 시점(%)별 스타일을 정의
+   0% = 시작, 30% = 위로 올라감, 60% = 내려옴, 100% = 끝 */
 @keyframes typing-dot {
   0%, 60%, 100% { opacity: 0.3; transform: translateY(0); }
   30% { opacity: 1; transform: translateY(-4px); }
 }
+/* nth-child: 몇 번째 자식 요소인지에 따라 다른 스타일 적용
+   delay를 0.2초씩 어긋나게 하여 "파도 효과" 생성
+   점1: 0s → 점2: 0.2s → 점3: 0.4s (순서대로 튀어오름) */
 .typing-dot:nth-child(1) { animation: typing-dot 1.4s infinite 0s; }
 .typing-dot:nth-child(2) { animation: typing-dot 1.4s infinite 0.2s; }
 .typing-dot:nth-child(3) { animation: typing-dot 1.4s infinite 0.4s; }
 
-/* Fade in animation for messages */
+/* -----------------------------------------------------------------------
+   메시지 등장 애니메이션
+   ----------------------------------------------------------------------- */
+/* 새 채팅 메시지가 나타날 때 아래에서 위로 페이드인
+   opacity: 투명도 (0=투명, 1=불투명)
+   translateY: Y축 이동 (8px 아래에서 시작 → 0으로 올라옴) */
 @keyframes fade-in-up {
   from { opacity: 0; transform: translateY(8px); }
   to { opacity: 1; transform: translateY(0); }
 }
+/* .animate-fade-in-up 클래스를 요소에 추가하면 이 애니메이션이 적용됨
+   ease-out: 끝에서 천천히 (자연스러운 감속 효과) */
 .animate-fade-in-up {
   animation: fade-in-up 0.3s ease-out;
 }
 
-/* Pulse animation for processing */
+/* -----------------------------------------------------------------------
+   처리 중 깜빡임 애니메이션
+   ----------------------------------------------------------------------- */
+/* "Analyzing your document..." 텍스트가 부드럽게 깜빡이는 효과
+   opacity를 1 → 0.6 → 1로 반복하여 "살아있음"을 표시 */
 @keyframes pulse-subtle {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.6; }

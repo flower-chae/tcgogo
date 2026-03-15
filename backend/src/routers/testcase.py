@@ -1,3 +1,32 @@
+"""
+TestCase API 라우터
+===================
+
+이 파일은 TestCase 생성 관련 모든 API 엔드포인트를 정의한다.
+
+전체 흐름:
+1. 클라이언트가 POST 요청 → 엔드포인트가 DB에 세션 생성 + 202 즉시 응답
+2. BackgroundTasks로 비동기 작업 시작 (에이전트 호출)
+3. 클라이언트가 GET으로 폴링하여 작업 완료 확인
+4. 완료 시 결과(FR/NFR, TC, Validation)를 읽어감
+
+API 엔드포인트 목록:
+  POST /extract-fr-nfr         → FR/NFR 추출 시작
+  POST /generate               → 전체 파이프라인 (추출+생성) 시작
+  POST /{session_id}/generate  → 기존 세션에서 TC 생성
+  POST /{session_id}/validate  → 커버리지 검증 시작
+  GET  /                       → 세션 목록 조회 (최근 20개)
+  GET  /{session_id}           → 세션 상세 조회
+  GET  /{session_id}/stream    → SSE 스트리밍 (폴링 대안)
+
+비동기 처리 패턴:
+  클라이언트 → POST → [세션 생성] → 202 즉시 응답
+                      [BackgroundTask 시작]
+                      → 에이전트 호출 (수 초~수 분)
+                      → DB 업데이트 (status, fr_nfr, testcases 등)
+  클라이언트 → GET (폴링) → 상태 확인 → completed이면 결과 읽기
+"""
+
 import asyncio
 import json
 import uuid
@@ -15,6 +44,9 @@ from src.db.models import (
     SessionResponse,
 )
 
+# APIRouter: URL 경로별로 엔드포인트를 그룹화하는 FastAPI 기능
+# prefix: 이 라우터의 모든 경로 앞에 /api/v1/testcase가 붙는다
+# tags: Swagger 문서에서 그룹 이름으로 표시
 router = APIRouter(prefix="/api/v1/testcase", tags=["testcase"])
 
 
