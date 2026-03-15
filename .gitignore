@@ -1,0 +1,40 @@
+# Environment
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+dist/
+
+# Node
+node_modules/
+
+# Nuxt / Frontend build
+.nuxt/
+.output/
+.nitro/
+.cache/
+.data/
+
+# Backend logs
+backend/var/logs/
+
+# IDE
+.idea/
+.vscode/
+.fleet/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Lock files (optional - uv.lock can be committed for reproducibility)
+# backend/uv.lock
