@@ -385,54 +385,27 @@ export const useTestcaseStore = defineStore('testcase', {
     },
 
     /**
-     * 에이전트 진행 단계를 로딩 메시지에 추가한다.
+     * 에이전트 상태 메시지를 업데이트한다 (ChatGPT thinking 스타일).
      *
      * SSE의 step 이벤트를 받을 때마다 호출된다.
-     * 로딩 메시지의 steps 배열에 단계를 추가/업데이트하여
-     * 사용자에게 에이전트가 지금 뭘 하고 있는지 보여준다.
+     * 단계를 누적하지 않고, 현재 로딩 메시지의 content를 교체한다.
+     * → "요구사항 분석 중..." → "FR/NFR 추출 중..." → "테스트 케이스 생성 중..."
      *
-     * 화면 예시:
-     *   ✅ 요구사항에서 FR/NFR 추출 중... → Saved 8 FR and 3 NFR
-     *   ✅ 테스트 케이스 생성 중... → Saved 15 test cases
-     *   🔄 커버리지 확인 중...  ← 현재 진행 중
+     * ChatGPT의 thinking 표시처럼:
+     * - 하나의 메시지만 표시
+     * - 새로운 상태가 오면 이전 메시지를 교체
+     * - shimmer 애니메이션으로 "처리 중" 느낌
      */
-    _addAgentStep(data: { type: string, tool?: string, message: string, icon?: string }) {
+    _addAgentStep(data: { type: string, message: string }) {
       if (!this._pendingLoadingMsgId) return
       const idx = this.messages.findIndex(m => m.id === this._pendingLoadingMsgId)
       if (idx < 0) return
 
+      // content만 교체 → shimmer 애니메이션이 새 텍스트에 적용됨
       const msg = this.messages[idx]
-      // steps 배열이 없으면 초기화
-      if (!msg.steps) {
-        msg.steps = []
-      }
+      msg.content = data.message
 
-      if (data.type === 'tool_start') {
-        // 도구 시작: 새 단계 추가 (진행 중 상태)
-        msg.steps.push({
-          message: data.message,
-          done: false,
-          icon: data.icon,
-        })
-        // 로딩 메시지의 content도 현재 단계로 업데이트
-        msg.content = data.message
-      } else if (data.type === 'tool_end') {
-        // 도구 완료: 마지막 진행 중 단계를 완료로 변경
-        const lastPending = [...msg.steps].reverse().find(s => !s.done)
-        if (lastPending) {
-          lastPending.done = true
-          lastPending.message = data.message  // 결과 메시지로 교체
-        }
-      } else if (data.type === 'agent_start' || data.type === 'fallback') {
-        // 에이전트 시작 또는 모델 변경: 정보성 단계 추가
-        msg.steps.push({
-          message: data.message,
-          done: true,
-          icon: data.icon,
-        })
-      }
-
-      // 반응형 업데이트 트리거 (Vue가 배열 내부 변경을 감지하도록)
+      // 반응형 업데이트 트리거
       this.messages[idx] = { ...msg }
     },
 

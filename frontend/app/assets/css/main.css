@@ -108,3 +108,49 @@ html, body {
 .animate-pulse-subtle {
   animation: pulse-subtle 2s ease-in-out infinite;
 }
+
+/* -----------------------------------------------------------------------
+   "Inferring" 스타일 색상 흐름 효과
+   ----------------------------------------------------------------------- */
+/* Claude Code의 "Inferring..." 표시와 같은 느낌
+   텍스트 색상이 부드럽게 변하며 흘러가는 효과
+
+   원리:
+   1. 텍스트에 넓은 그라데이션 배경을 입힌다 (background-clip: text)
+   2. 그라데이션을 천천히 좌→우로 이동시킨다 (background-position 애니메이션)
+   3. 여러 색상이 섞여 있어 "물 흐르듯" 색이 변하는 느낌
+
+   색상 구성:
+   - #8b949e (회색) → #a371f7 (보라) → #58a6ff (파랑) → #3fb950 (녹색) → 반복
+   - 이 색들이 서서히 텍스트 위를 지나가며 색이 바뀌는 느낌 */
+@keyframes color-flow {
+  0% { background-position: 0% center; }
+  100% { background-position: 300% center; }
+}
+
+/* 빛이 천천히 왔다갔다 하는 효과
+   alternate: 끝에 도달하면 반대 방향으로 되돌아옴 (왕복)
+   ease-in-out: 양 끝에서 천천히, 가운데에서 빠르게 (자연스러운 왕복) */
+@keyframes shimmer-glow {
+  0% { background-position: 200% center; }
+  100% { background-position: 0% center; }
+}
+.animate-shimmer {
+  color: #8b949e !important;
+  background: linear-gradient(
+    90deg,
+    #8b949e 0%,
+    #a371f7 15%,
+    #58a6ff 30%,
+    #3fb950 45%,
+    #58a6ff 60%,
+    #a371f7 75%,
+    #8b949e 90%,
+    #a371f7 100%
+  ) !important;
+  background-size: 300% auto !important;
+  -webkit-background-clip: text !important;
+  background-clip: text !important;
+  -webkit-text-fill-color: transparent !important;
+  animation: color-flow 4s linear infinite;
+}

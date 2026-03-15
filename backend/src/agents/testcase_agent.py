@@ -123,26 +123,29 @@ async def _publish_event(session_id: str, event: dict) -> None:
 # ---------------------------------------------------------------------------
 # 에이전트의 도구 호출 이벤트를 프론트엔드에서 보여줄 메시지로 변환한다.
 # 도구 이름은 영문이지만, 표시 메시지는 한국어와 이모지를 사용하여 직관적으로 만든다.
+# 프론트엔드에 표시할 메시지 매핑
+# start: 도구 호출 시작 시 → "~~ 중..." (shimmer 효과로 표시)
+# done: 도구 호출 완료 시 → 간단한 완료 메시지
 TOOL_DISPLAY = {
     "save_requirements": {
-        "start": "요구사항에서 FR/NFR 추출 중...",
-        "icon": "search",
+        "start": "요구사항에서 FR/NFR을 추출하고 있습니다...",
+        "done": "FR/NFR 추출 결과를 저장했습니다",
     },
     "save_testcases": {
-        "start": "테스트 케이스 생성 중...",
-        "icon": "testcase",
+        "start": "테스트 케이스를 생성하고 있습니다...",
+        "done": "테스트 케이스를 저장했습니다",
     },
     "check_coverage": {
-        "start": "커버리지 확인 중...",
-        "icon": "chart",
+        "start": "요구사항 커버리지를 분석하고 있습니다...",
+        "done": "커버리지 분석이 완료되었습니다",
     },
     "get_progress": {
-        "start": "진행 상황 확인 중...",
-        "icon": "progress",
+        "start": "현재 진행 상황을 확인하고 있습니다...",
+        "done": "",
     },
     "save_validation": {
-        "start": "검증 결과 정리 중...",
-        "icon": "validate",
+        "start": "검증 결과를 정리하고 있습니다...",
+        "done": "검증 결과를 저장했습니다",
     },
 }
 
@@ -421,18 +424,13 @@ async def _invoke_agent_with_fallback(
 
             # 에이전트 시작 이벤트 발행
             await _publish_event(session_id, {
-                "type": "agent_start",
-                "message": "에이전트가 작업을 시작합니다...",
-                "model": model_name,
+                "type": "status",
+                "message": "요구사항을 분석하고 있습니다...",
             })
 
             # ---------------------------------------------------------
             # astream_events(): 에이전트 실행 + 중간 이벤트 스트리밍
             # ---------------------------------------------------------
-            # ainvoke()와 동일하게 에이전트를 끝까지 실행하지만,
-            # 실행 중 발생하는 이벤트를 async for로 하나씩 받을 수 있다.
-            #
-            # version="v2": 이벤트 형식 버전 (v2가 최신, 더 구조화됨)
             async for event in agent.astream_events(
                 {"messages": [{"role": "user", "content": prompt}]},
                 config=config,
@@ -441,27 +439,31 @@ async def _invoke_agent_with_fallback(
                 event_kind = event.get("event", "")
                 event_name = event.get("name", "")
 
-                # 우리 커스텀 도구의 시작/종료만 캡처
-                # (DeepAgent 빌트인 도구 이벤트는 무시)
+                # 우리 커스텀 도구의 시작만 캡처하여 상태 메시지 발행
+                # → 프론트엔드에서 하나의 메시지가 교체되는 방식 (ChatGPT thinking 스타일)
+                # → tool_end는 발행하지 않음 (결과가 raw ToolMessage라 보기 안 좋음)
                 if event_kind == "on_tool_start" and event_name in _CUSTOM_TOOL_NAMES:
-                    # 도구 호출 시작 → 프론트엔드에 "~~ 중..." 표시
                     display = TOOL_DISPLAY.get(event_name, {})
                     await _publish_event(session_id, {
-                        "type": "tool_start",
-                        "tool": event_name,
-                        "message": display.get("start", f"{event_name} 실행 중..."),
-                        "icon": display.get("icon", "default"),
+                        "type": "status",
+                        "message": display.get("start", f"{event_name} 처리 중..."),
                     })
 
                 elif event_kind == "on_tool_end" and event_name in _CUSTOM_TOOL_NAMES:
-                    # 도구 호출 완료 → 프론트엔드에 결과 표시
+                    # 도구 완료 시 → 축적 현황을 간단히 알림
+                    # ToolMessage에서 content만 추출 (raw 객체 방지)
                     output = event.get("data", {}).get("output", "")
-                    await _publish_event(session_id, {
-                        "type": "tool_end",
-                        "tool": event_name,
-                        "message": str(output),
-                        "icon": TOOL_DISPLAY.get(event_name, {}).get("icon", "default"),
-                    })
+                    if hasattr(output, "content"):
+                        output = output.content
+                    output_str = str(output) if output else ""
+
+                    # 축적 현황에서 숫자만 추출하여 깔끔한 메시지 생성
+                    summary = TOOL_DISPLAY.get(event_name, {}).get("done", "")
+                    if summary:
+                        await _publish_event(session_id, {
+                            "type": "status",
+                            "message": summary,
+                        })
 
             # astream_events 루프가 끝나면 에이전트 실행 완료
             # → contextvars에 축적된 결과를 검증

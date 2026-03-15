@@ -390,32 +390,16 @@ onMounted(() => {
                 </div>
 
                 <div class="flex-1 min-w-0">
-                  <!-- Loading / 에이전트 진행 상황 표시 -->
-                  <!-- msg.steps가 있으면: 도구 호출 단계별로 표시 (SSE 스트리밍) -->
-                  <!-- msg.steps가 없으면: 기존 로딩 메시지 + 타이핑 애니메이션 (폴링 fallback) -->
+                  <!-- Loading / 에이전트 진행 상황 (Claude Code "Inferring" 스타일) -->
                   <div v-if="msg.type === 'loading'" class="space-y-2">
-                    <!-- 에이전트 진행 단계 목록 (SSE로 실시간 수신된 단계들) -->
-                    <div v-if="msg.steps && msg.steps.length > 0" class="space-y-1.5">
-                      <div
-                        v-for="(step, idx) in msg.steps"
-                        :key="idx"
-                        class="flex items-start gap-2 text-sm"
-                      >
-                        <!-- 완료된 단계: ✅ 아이콘 -->
-                        <span v-if="step.done" class="shrink-0 mt-0.5" style="color: #3fb950;">✓</span>
-                        <!-- 진행 중인 단계: 깜빡이는 점 -->
-                        <span v-else class="shrink-0 mt-0.5 animate-pulse-subtle" style="color: #58a6ff;">●</span>
-                        <span :style="{ color: step.done ? '#8b949e' : '#e6edf3' }">{{ step.message }}</span>
-                      </div>
-                    </div>
-                    <!-- 현재 진행 중 표시 (마지막 단계가 미완료이거나 단계가 없을 때) -->
-                    <div v-if="!msg.steps || msg.steps.length === 0 || !msg.steps[msg.steps.length - 1]?.done">
-                      <p v-if="!msg.steps || msg.steps.length === 0" class="text-sm animate-pulse-subtle" style="color: #8b949e;">{{ msg.content }}</p>
-                      <div class="flex gap-1 py-1">
-                        <div class="typing-dot w-2 h-2 rounded-full" style="background-color: #8b949e;"></div>
-                        <div class="typing-dot w-2 h-2 rounded-full" style="background-color: #8b949e;"></div>
-                        <div class="typing-dot w-2 h-2 rounded-full" style="background-color: #8b949e;"></div>
-                      </div>
+                    <p
+                      class="text-sm"
+                      style="background: linear-gradient(90deg, #6e7681 0%, #6e7681 35%, #e6edf3 50%, #6e7681 65%, #6e7681 100%); background-size: 200% auto; -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; animation: shimmer-glow 3.5s linear infinite;"
+                    >{{ msg.content }}</p>
+                    <div class="flex gap-1 py-1">
+                      <div class="typing-dot w-1.5 h-1.5 rounded-full" style="background-color: #58a6ff;"></div>
+                      <div class="typing-dot w-1.5 h-1.5 rounded-full" style="background-color: #58a6ff;"></div>
+                      <div class="typing-dot w-1.5 h-1.5 rounded-full" style="background-color: #58a6ff;"></div>
                     </div>
                   </div>
 

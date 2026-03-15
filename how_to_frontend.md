@@ -127,3 +127,89 @@ GitHub Dark 테마의 색상 코드를 직접 사용했다:
 ```
 - 작은 애니메이션 몇 개만으로도 "모던함"이 크게 향상됨
 - fade-in, typing dots, hover transition 정도면 충분
+
+---
+
+## UI 효과 용어 사전
+
+Claude Code에 작업을 지시할 때 사용할 수 있는 효과 이름과 의미.
+
+### 효과 종류
+
+| 용어 | 의미 | 사용 예시 |
+|------|------|----------|
+| **text shimmer** | 텍스트 위로 빛이 천천히 흘러가는 효과. 회색 텍스트에 밝은 빛이 왼쪽→오른쪽으로 지나감. Claude Code의 "Inferring..." 느낌. | "로딩 텍스트에 text shimmer 적용해줘" |
+| **skeleton shimmer** | 회색 박스(뼈대) 위로 빛이 지나가는 효과. 콘텐츠 로딩 전 자리 표시. | "데이터 로딩 전에 skeleton shimmer 보여줘" |
+| **pulse** | 요소 전체가 부드럽게 깜빡이는 효과. 투명도(opacity)가 반복 변화. | "로딩 중에 pulse 효과 넣어줘" |
+| **fade-in** | 투명→불투명으로 서서히 나타나는 효과. | "메시지가 fade-in으로 나타나게 해줘" |
+| **fade-in-up** | 아래에서 위로 올라오며 나타나는 효과. | "카드가 fade-in-up으로 등장하게 해줘" |
+| **typing dots** | ●●● 점 3개가 순서대로 튀어오르는 효과. AI가 응답 중일 때 사용. | "AI 응답 대기 시 typing dots 보여줘" |
+| **gradient wave** | 여러 색상이 물결처럼 텍스트를 흐르는 효과. 화려한 버전. | "제목에 gradient wave 효과 넣어줘" |
+| **hover transition** | 마우스를 올리면 부드럽게 색이 변하는 효과. | "버튼에 hover transition 넣어줘" |
+
+### 이 프로젝트에서 사용 중인 효과
+
+```
+1. text shimmer — 에이전트 처리 중 상태 메시지
+   "요구사항을 분석하고 있습니다..." ← 빛이 왼→오로 흐름
+   지시법: "shimmer 효과로 해줘" 또는 "text shimmer 적용해줘"
+
+2. typing dots — text shimmer 아래에 ●●● 점 3개 애니메이션
+   지시법: "typing dots 추가해줘"
+
+3. fade-in-up — 새 채팅 메시지가 아래에서 올라오며 등장
+   지시법: "fade-in-up으로 나타나게 해줘"
+
+4. pulse — 처리 중 텍스트가 부드럽게 깜빡임 (shimmer 적용 전 사용했던 효과)
+   지시법: "pulse 효과 넣어줘"
+```
+
+### Claude Code에 효과 지시하는 방법
+
+```markdown
+# 좋은 예 (구체적)
+
+"로딩 메시지에 text shimmer 효과 적용해줘.
+ 회색 톤(#6e7681 → #e6edf3)으로, 왼→오 방향, 3.5초 주기"
+
+"버튼 hover 시 brightness-110으로 transition 넣어줘"
+
+"새 메시지 등장 시 fade-in-up 0.3초로 해줘"
+
+# 나쁜 예 (모호함)
+
+"이쁘게 움직이게 해줘"          → 어떤 효과?
+"반짝거리게"                   → shimmer? pulse? 다른 거?
+"뭔가 효과 넣어줘"              → 기준이 없음
+```
+
+### text shimmer 구현 원리 (참고용)
+
+```css
+/* 핵심 원리: 텍스트를 클리핑 마스크로 사용하여 배경 그라데이션을 보여준다 */
+
+@keyframes shimmer-glow {
+  0% { background-position: 200% center; }    /* 빛이 오른쪽에서 시작 */
+  100% { background-position: 0% center; }    /* 왼쪽으로 이동 완료 */
+}
+
+/* 적용 방법 (인라인 style 권장 — Tailwind가 덮어쓰는 문제 방지) */
+style="
+  background: linear-gradient(90deg,
+    #6e7681 0%,      /* 기본 회색 */
+    #6e7681 35%,     /* 회색 유지 */
+    #e6edf3 50%,     /* 밝은 빛 포인트 */
+    #6e7681 65%,     /* 회색 복귀 */
+    #6e7681 100%     /* 회색 끝 */
+  );
+  background-size: 200% auto;
+  -webkit-background-clip: text;         /* 텍스트 모양으로 배경 자르기 */
+  background-clip: text;
+  -webkit-text-fill-color: transparent;  /* 기본 텍스트 색 숨기기 */
+  animation: shimmer-glow 3.5s linear infinite;
+"
+```
+
+**주의: CSS 클래스 대신 인라인 style로 적용해야 한다.**
+Tailwind 4 + Vite 환경에서 `background-clip: text`가 클래스로 적용 시
+Tailwind에 의해 덮어씌워질 수 있다. 인라인 style은 항상 최우선 적용.
