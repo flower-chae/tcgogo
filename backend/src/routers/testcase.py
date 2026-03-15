@@ -221,9 +221,11 @@ async def _run_validation(session_id: uuid.UUID) -> None:
                 row["requirement"], fr_nfr, row["testcases"] or [], sid,
             )
 
+            # validation 결과 저장 + status를 "completed"로 복원
+            # ("validating" → "completed"로 되돌림)
             await conn.execute(
-                "UPDATE testcase_sessions SET validation = $1, updated_at = NOW() WHERE id = $2",
-                validation, session_id,
+                "UPDATE testcase_sessions SET validation = $1, status = $2, updated_at = NOW() WHERE id = $3",
+                validation, "completed", session_id,
             )
 
             await _publish_event(sid, {
@@ -372,10 +374,19 @@ async def validate_session(
     if row is None:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    if row["status"] != "completed" or not row["testcases"]:
+    if row["status"] not in ("completed", "validating") or not row["testcases"]:
         raise HTTPException(
             status_code=400,
             detail="Session must be in 'completed' status with generated test cases before validation.",
+        )
+
+    # status를 "validating"으로 변경 — SSE가 "completed"를 보고 즉시 닫히는 것을 방지
+    # (SSE 엔드포인트는 TERMINAL_STATUSES에 포함된 상태를 보면 즉시 연결을 종료하는데,
+    #  "completed"가 TERMINAL_STATUSES에 포함되어 있으므로 변경 필수)
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE testcase_sessions SET status = $1, updated_at = NOW() WHERE id = $2",
+            "validating", session_id,
         )
 
     background_tasks.add_task(_run_validation, session_id)
